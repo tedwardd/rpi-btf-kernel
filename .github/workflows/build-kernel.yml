@@ -1,0 +1,174 @@
+name: Build RPi Kernel with BTF
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild even if upstream unchanged'
+        type: boolean
+        default: false
+  schedule:
+    # Check for upstream changes daily at 03:00 UTC
+    - cron: '0 3 * * *'
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  KERNEL_BRANCH: rpi-6.12.y
+  KERNEL_REPO: https://github.com/raspberrypi/linux
+  DEFCONFIG: bcm2711_defconfig
+
+jobs:
+  check-upstream:
+    name: Check for upstream changes
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_sha: ${{ steps.get-sha.outputs.sha }}
+      needs_build: ${{ steps.compare.outputs.needs_build }}
+    steps:
+      - name: Get upstream HEAD SHA
+        id: get-sha
+        run: |
+          SHA=$(git ls-remote ${{ env.KERNEL_REPO }} refs/heads/${{ env.KERNEL_BRANCH }} | cut -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Upstream ${{ env.KERNEL_BRANCH }} HEAD: $SHA"
+
+      - name: Check if already built
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          UPSTREAM_SHA="${{ steps.get-sha.outputs.sha }}"
+          FORCE="${{ github.event.inputs.force_rebuild }}"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "Force rebuild requested"
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Look for a release whose body contains this upstream SHA
+          MATCH=$(gh release list --repo ${{ github.repository }} --limit 20 --json tagName,body \
+            | jq -r '.[] | select(.body | contains("upstream-sha: '"$UPSTREAM_SHA"'")) | .tagName' \
+            | head -1 || true)
+
+          if [ -n "$MATCH" ]; then
+            echo "Already built as release $MATCH, skipping"
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No matching release found, triggering build"
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Cross-compile kernel
+    needs: check-upstream
+    if: needs.check-upstream.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo (for config-fragment)
+        uses: actions/checkout@v4
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu bison flex libelf-dev dwarves bc \
+            libssl-dev cpio kmod debhelper rsync
+
+      - name: Verify pahole version
+        run: pahole --version
+
+      - name: Clone RPi kernel (shallow)
+        run: |
+          git clone --depth=1 --branch ${{ env.KERNEL_BRANCH }} \
+            ${{ env.KERNEL_REPO }} linux
+          echo "Cloned: $(git -C linux rev-parse HEAD)"
+
+      - name: Generate defconfig
+        working-directory: linux
+        run: |
+          make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+            ${{ env.DEFCONFIG }}
+
+      - name: Apply BTF config fragment
+        working-directory: linux
+        run: |
+          scripts/config --disable CONFIG_DEBUG_INFO_NONE
+          scripts/config --enable CONFIG_DEBUG_INFO
+          scripts/config --enable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          scripts/config --enable CONFIG_DEBUG_INFO_BTF
+          make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+            olddefconfig
+
+      - name: Verify BTF options
+        working-directory: linux
+        run: |
+          grep -E "CONFIG_DEBUG_INFO|CONFIG_DEBUG_INFO_BTF|CONFIG_DEBUG_INFO_DWARF" .config
+          grep "^CONFIG_DEBUG_INFO_BTF=y" .config || (echo "ERROR: BTF not enabled!" && exit 1)
+
+      - name: Build Debian packages
+        working-directory: linux
+        run: |
+          make -j$(nproc) \
+            ARCH=${{ env.ARCH }} \
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+            KBUILD_IMAGE=arch/arm64/boot/Image.gz \
+            bindeb-pkg
+
+      - name: List built packages
+        run: |
+          ls -lh *.deb
+
+      - name: Get kernel version and tag
+        id: version
+        run: |
+          KVER=$(cat linux/include/config/kernel.release)
+          UPSTREAM_SHA="${{ needs.check-upstream.outputs.upstream_sha }}"
+          SHORT_SHA=${UPSTREAM_SHA:0:8}
+          TAG="kernel-${KVER}-${SHORT_SHA}"
+          echo "kernel_version=$KVER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Kernel version: $KVER  Tag: $TAG"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ needs.check-upstream.outputs.upstream_sha }}
+        run: |
+          KVER="${{ steps.version.outputs.kernel_version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          gh release create "$TAG" *.deb \
+            --repo ${{ github.repository }} \
+            --title "RPi Kernel ${KVER} (BTF enabled)" \
+            --notes "$(cat <<EOF
+          ## Raspberry Pi Kernel ${KVER} with BTF Support
+
+          - **Branch**: ${{ env.KERNEL_BRANCH }}
+          - **Defconfig**: ${{ env.DEFCONFIG }}
+          - **Target**: Raspberry Pi 4 (ARM64)
+          - upstream-sha: ${UPSTREAM_SHA}
+
+          ### Enabled config options
+          \`\`\`
+          CONFIG_DEBUG_INFO=y
+          CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+          CONFIG_DEBUG_INFO_BTF=y
+          CONFIG_DEBUG_INFO_BTF_MODULES=y
+          \`\`\`
+
+          ### Install on jumpstar
+          \`\`\`bash
+          # Download and install the image package (includes kernel + modules)
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${TAG}/linux-image-${KVER}_${KVER}-1_arm64.deb
+          sudo dpkg -i linux-image-${KVER}_${KVER}-1_arm64.deb
+          sudo reboot
+          \`\`\`
+
+          After reboot, verify:
+          \`\`\`bash
+          ls /sys/kernel/btf/vmlinux
+          systemctl status ebpf-net-exporter
+          \`\`\`
+          EOF
+          )"

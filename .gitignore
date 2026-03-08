@@ -1,0 +1,6 @@
+linux/
+modules_out/
+build.log
+*.tar.gz
+*.img
+*.dtb

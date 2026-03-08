@@ -1,0 +1,6 @@
+# BTF support for CO-RE eBPF programs
+# Required for ebpf-net-exporter on Raspberry Pi
+CONFIG_DEBUG_INFO_NONE=n
+CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+CONFIG_DEBUG_INFO_BTF=y
