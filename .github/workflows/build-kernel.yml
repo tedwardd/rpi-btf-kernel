@@ -114,6 +114,7 @@ jobs:
             ARCH=${{ env.ARCH }} \
             CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
             KBUILD_IMAGE=arch/arm64/boot/Image.gz \
+            DPKG_FLAGS=-d \
             bindeb-pkg
 
       - name: List built packages
