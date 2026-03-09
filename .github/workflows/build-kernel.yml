@@ -73,7 +73,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu bison flex libelf-dev dwarves bc \
+            build-essential gcc-aarch64-linux-gnu bison flex libelf-dev dwarves bc \
             libssl-dev cpio kmod debhelper rsync
 
       - name: Verify pahole version
@@ -110,12 +110,17 @@ jobs:
       - name: Build Debian packages
         working-directory: linux
         run: |
+          # The linux-headers package may fail to compile host-side tools
+          # (genksyms) in a cross-compilation environment on Ubuntu 24.04.
+          # We only need linux-image for the Pi, so allow that failure.
           make -j$(nproc) \
             ARCH=${{ env.ARCH }} \
             CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
             KBUILD_IMAGE=arch/arm64/boot/Image.gz \
             DPKG_FLAGS=-d \
-            bindeb-pkg
+            bindeb-pkg || true
+          # Fail fast if the image package we actually need wasn't produced
+          ls ../*linux-image*_arm64.deb
 
       - name: List built packages
         run: |
