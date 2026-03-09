@@ -135,7 +135,7 @@ jobs:
           KVER=$(cat linux/include/config/kernel.release)
           UPSTREAM_SHA="${{ needs.check-upstream.outputs.upstream_sha }}"
           SHORT_SHA=${UPSTREAM_SHA:0:8}
-          TAG="kernel-${KVER}-${SHORT_SHA}"
+          TAG="kernel-${KVER}-${SHORT_SHA}-r${{ github.run_number }}"
           echo "kernel_version=$KVER" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Kernel version: $KVER  Tag: $TAG"
