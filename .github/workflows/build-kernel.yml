@@ -11,6 +11,9 @@ on:
     # Check for upstream changes daily at 03:00 UTC
     - cron: '0 3 * * *'
 
+permissions:
+  contents: write
+
 env:
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
